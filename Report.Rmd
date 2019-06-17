@@ -1,0 +1,226 @@
+---
+title: "Who survived on the Titanic"
+author: "Mathieu Klimczak"
+date: "16/06/2019"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::read_chunk('Titanic.R')
+library(tidyverse)
+library(caret)
+library(Cairo)
+library(randomForest)
+library(gam)
+library(Rborist)
+library(timeR)
+library(ggthemes) # visualization
+library(ggridges) # visualization
+library(corrplot) # correlation visualisation
+library(VIM) # missing values
+```
+
+
+## Introduction
+
+The goal here will be to predict whether or not passenger of the titanic will survive, thus a classification task. 
+
+This data set is a classical one available on Kaggle, that you can find here at the following adress.
+
+https://www.kaggle.com/c/titanic/data
+
+Since the test set given by Kaggle obviously don't have the result, we'll use the train set and split it into train set and validation set to perform our ML task.
+
+Let's first import the train set, see what it looks like and transform the class of some predictor for later use.
+
+```{r Import_Datas, tidy=T, tidy.opts=list(comment=FALSE)}
+```
+
+The data dictionnary is the following one.
+
+- Survival : 0 = No, 1 = Yes
+- Pclass :	Ticket class 	1 = 1st, 2 = 2nd, 3 = 3rd
+- sex :	Sex 
+- Age :	Age in years 
+- sibsp :	# of siblings / spouses aboard the Titanic 
+- parch :	# of parents / children aboard the Titanic 
+- ticket :	Ticket number 
+- fare : Passenger fare 
+- cabin :	Cabin number 
+- embarked :	Port of Embarkation C = Cherbourg, Q = Queenstown, S = Southampton
+
+
+## Exploratory Data Analysis, new predictors
+
+### Structure and missing values
+
+Let's check the global structure of the dataset.
+
+```{r First_Check_NA, tidy=T, tidy.opts=list(comment=FALSE)}
+```
+For missing values we use the VIM library, each row is a combination of predictors with missing values. There are 529 observations where the only missing value is the cabin, 158 obsevations where it is the cabin and the age, 19 obsevartions where only the age is missing and finally, 2 observations where the place of embarkation is missing.
+
+We have the following correlations for the predictors. Some of the interesting corelations are Pclass/Survived, Sex/Survived, Age/Pclass, Fare/Pclass
+
+```{r Correlation_matrix, tidy=F, tidy.opts=list(comment=FALSE)}
+```
+
+### the Age
+```{r Age, tidy=T, tidy.opts=list(comment=FALSE), warning=FALSE}
+```
+Although the ship is mostly filled with adults around 30-40 years old, young adults and children seem more common in the 2nd and 3rd class, whereas older people, ie > 40 years old are more common in the first class
+
+The class with the highest rate of survival if the first one. In the third class, nearly 75% died. Nearly 75% of the women survived
+
+### the cabin
+
+We now look at the cabin, the first letter corresponds to the deck. Let's see what we can deduce from it
+
+```{r NP_Cabin, tidy=T, tidy.opts=list(comment=FALSE)}
+```
+
+Decks A,B,C, and T are exclusively filled with 1st class, G with 3rd class, 2nd class is only found on decks D,E,F. Everybody died on Deck T.
+
+### The name
+
+The full name won't be usefull as it is, however, we can extract the title of the passenger. Master accounts for young children, apart from female and male title, one can also noticed some "rare titles" like "Sir", "Don" etc.
+
+
+```{r NP_Title, tidy=T, tidy.opts=list(comment=FALSE)}
+```
+
+Grouping titles as we have done, we have a better distinction better people.
+
+### The family : Parch + SibSp
+
+Small families, ie between 2-4 people, were much more likely to survive as we can see in the following plot. Let's create a predictor for that
+
+```{r NP_Family, tidy=T, tidy.opts=list(comment=FALSE)}
+```
+
+### The fare
+
+As it is, the Fare doesn't seem to be usefull. The strange thing here is that the class here overlap a lot, which shouldn't be. The price of the travel in the 3rd class shouldn't overlap as much the price of the 1rst class, which is the most expensive one.
+
+
+```{r NP_Fare1, tidy=T, tidy.opts=list(comment=FALSE)}
+```
+
+As we can see here, the Fare predictor does not seem to correspond to the price of one person, but to the whole price for a group, i.e. the ticket 1601 seems to account for 7 people traveling together. The real price should then be given by the following code.
+
+
+```{r NP_Fare2, tidy=T, tidy.opts=list(comment=FALSE)}
+```
+
+We now have a much clearer separation between the different classes.
+
+
+
+### Port of embarkation
+
+Does the port of embarkation has an influence on the rate of survival ?
+
+```{r Embarkation, tidy=T, tidy.opts=list(comment=FALSE)}
+```
+
+Clearly, the port of embarkation seems to have an influence on the survival rate.
+
+
+## Preprocessing
+
+### Missing port of embarkation values
+
+Only two people have a missing port of embarkation, they have the same ticket number, so they traveled together and thus have the same port of embarkation. They are from the first class and are located on deck. We'll use the the most frequent port of embarkation under these criterions to fill in the blanks.
+
+
+```{r Missing_Embarkation, tidy=F, tidy.opts=list(comment=FALSE)}
+```
+
+### Missing decks values
+
+Concerning the missing deck values, it seems we won't be predict anything, especially for the third class, where almost all of them have a missing value. What we can do however is create a new predictor on whether or not the deck is known.
+
+```{r Missing_Deck1, tidy=F, tidy.opts=list(comment=FALSE)}
+```
+
+
+### Missing Age values
+
+Here, we'll the preProcess function of the Caret package, which allows imputations of missing values. First we drop the predictors we won't use and transfrom into factors the newly created predictors.
+
+```{r Missing_Age, tidy=F, tidy.opts=list(comment=FALSE)}
+```
+
+### New Correlations
+
+Here's the new corelations we have now.
+
+```{r New_Correlation, echo=FALSE, tidy=T, tidy.opts=list(comment=FALSE)}
+```
+
+As we can see, some of the newly created predictors seems to be correlated. Thus, the shared_ticket predictor is correlated with the family size, and the real_fare is indeed correlated with Pclass.
+
+## ML algorithms
+
+First let's create the partition into train and validation set.
+
+### Partition creation
+```{r Partition_creation, tidy=T, tidy.opts=list(comment=FALSE)}
+```
+
+### Training
+
+We are going to use multiple models and combine their results, since we are on a classification task, we'll mostly use tree based methods, as well as perceptron and gradient boosting methods.
+
+
+
+```{r Ensembling_Training1, results = 'hide', tidy=T, tidy.opts=list(comment=FALSE), warning=FALSE}
+```
+
+
+Some algorithms might take some time to run, the timeElapsed column here is in seconds.
+
+```{r Timer, echo=FALSE, results = 'hide', tidy=T, tidy.opts=list(comment=FALSE), warning=FALSE}
+```
+
+```{r Timer2, echo=FALSE, tidy=T, tidy.opts=list(comment=FALSE), warning=FALSE}
+```
+
+
+
+```{r Ensembling_Training2, results = 'hide', tidy=T, tidy.opts=list(comment=FALSE), warning=FALSE}
+```
+
+### Predicting
+
+Let's apply the predicting to the validation and see the accuracy of each models. Note here that some models which took really long to run, like RRF and Rborist, had some pretty low results comapred to gbm which only 7 seconds.
+
+```{r Ensembling_Predicting, tidy=T, tidy.opts=list(comment=FALSE)}
+```
+
+the overall accuracy is around 0.80, but it was really long to run all of those models. So let's check the accuracy of the models obtained via cross validation and take only the best performing ones.
+
+
+```{r First_Acc_report, tidy=T, tidy.opts=list(comment=FALSE)}
+```
+
+```{r Acc_via_CV, tidy=T, tidy.opts=list(comment=FALSE)}
+```
+
+Let's predict again but just with the selected models.
+
+
+```{r Model_Selection_Training,results = 'hide', tidy=T, tidy.opts=list(comment=FALSE)}
+```
+
+
+```{r Model_Selection_Predicting, tidy=F, tidy.opts=list(comment=FALSE)}
+```
+
+
+## Conclusion
+
+As a result, we slightly improved the overall accuracy, but we also improved the running time of the model as well as the specificity.
